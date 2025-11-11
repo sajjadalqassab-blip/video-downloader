@@ -1,0 +1,9 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.5
+yt-dlp
+google-api-python-client
+google-auth
+google-auth-httplib2
+google-auth-oauthlib
+psutil
+python-dotenv

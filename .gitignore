@@ -1,0 +1,11 @@
+﻿venv/
+.env
+*.pyc
+__pycache__/
+*.log
+.DS_Store
+# yt-dlp temp/downloaded artifacts (optional)
+*.part
+*.ytdl
+*.mp4
+!keep_upload_samples/
