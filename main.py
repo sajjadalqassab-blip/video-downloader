@@ -1,30 +1,31 @@
-import os
-import time
-import yt_dlp
-import psutil
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
+import json
 from google.oauth2 import service_account
-from dotenv import load_dotenv
 
 # ─────────────────────────────────────────────
 # Load environment variables
 # ─────────────────────────────────────────────
 load_dotenv()
 
-GOOGLE_CREDS_PATH = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+# Get credentials JSON directly (Render env var)
+GOOGLE_CREDS_JSON = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
 DRIVE_FOLDER_ID = os.getenv("DRIVE_FOLDER_ID")
 MAKE_FILE_PUBLIC = os.getenv("MAKE_FILE_PUBLIC", "true").lower() == "true"
 
 app = FastAPI(title="TikTok Video Downloader + Google Drive Uploader")
 
-print(f"[DEBUG] GOOGLE_CREDS_PATH = {GOOGLE_CREDS_PATH}")
 print(f"[DEBUG] DRIVE_FOLDER_ID   = {DRIVE_FOLDER_ID}")
 print(f"[DEBUG] MAKE_FILE_PUBLIC  = {MAKE_FILE_PUBLIC}")
-print(f"[DEBUG] Creds file exists? {os.path.exists(GOOGLE_CREDS_PATH)}")
 
+# Parse credentials from JSON env var
+if not GOOGLE_CREDS_JSON:
+    raise RuntimeError("❌ Missing GOOGLE_APPLICATION_CREDENTIALS_JSON environment variable")
+
+try:
+    creds_dict = json.loads(GOOGLE_CREDS_JSON)
+    creds = service_account.Credentials.from_service_account_info(creds_dict)
+    print("[OK] Loaded Google credentials from environment JSON ✅")
+except Exception as e:
+    raise RuntimeError(f"❌ Failed to parse credentials JSON: {e}")
 # ─────────────────────────────────────────────
 # Safe delete (handles Windows file locks)
 # ─────────────────────────────────────────────
