@@ -1,5 +1,13 @@
-import json
+import os
+import time
+import yt_dlp
+import psutil
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
 from google.oauth2 import service_account
+from dotenv import load_dotenv  # ✅ ADD THIS LINE
 
 # ─────────────────────────────────────────────
 # Load environment variables
