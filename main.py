@@ -110,88 +110,56 @@ def upload_to_drive(file_path: str, folder_id: str):
 # ─────────────────────────────────────────────
 # AliExpress Video Extractor (FINAL WORKING VERSION)
 # ─────────────────────────────────────────────
-def extract_aliexpress_video(url: str) -> str:
-    print(f"[INFO] Trying AliExpress extractor → {url}")
+def download_tiktok_video(url: str, filename: str):
+    save_path = os.path.join(os.getcwd(), f"{filename}.mp4")
+    print(f"[INFO] Downloading {url}")
 
+    # Strong headers for AliExpress
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
-        )
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": url,
     }
 
+    ydl_opts = {
+        "outtmpl": save_path,
+        "format": "bestvideo+bestaudio/best",
+        "quiet": False,
+        "ignoreerrors": True,
+        "merge_output_format": "mp4",
+        "noprogress": True,
+        "http_headers": headers,
+        "force_generic_extractor": False,
+    }
+
+    # Detect AliExpress specifically
+    if "aliexpress." in url:
+        print("[INFO] Using yt-dlp AliExpress extractor...")
+        ydl_opts["extractor_args"] = {
+            "aliexpress": {
+                "language": ["en_US"],
+                "currency": ["USD"]
+            }
+        }
+
     try:
-        # Get raw HTML
-        r = requests.get(url, headers=headers, timeout=20)
-        html = r.text
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            result = ydl.download([url])
 
-        # ─────────────────────────────────────────────
-        # 1) Extract ANY JSON in runParams (even minified)
-        # ─────────────────────────────────────────────
-        json_candidates = re.findall(
-            r'runParams\s*=\s*(\{.*?\})\s*;',
-            html,
-            re.DOTALL
-        )
+        time.sleep(2)
 
-        for blob in json_candidates:
-            try:
-                data = json.loads(blob)
+        if not os.path.exists(save_path):
+            raise HTTPException(status_code=500, detail="Download failed: file not created")
 
-                # Path #1: data.props.video.url
-                video_url = (
-                    data.get("data", {})
-                        .get("props", {})
-                        .get("video", {})
-                        .get("url")
-                )
-                if video_url:
-                    print(f"[OK] runParams → video.url → {video_url}")
-                    return video_url
-
-                # Path #2: data.props.videos[0].src
-                videos = (
-                    data.get("data", {})
-                        .get("props", {})
-                        .get("videos", [])
-                )
-                if isinstance(videos, list) and videos and "src" in videos[0]:
-                    print(f"[OK] runParams → videos[0].src → {videos[0]['src']}")
-                    return videos[0]["src"]
-
-            except Exception:
-                pass
-
-        # ─────────────────────────────────────────────
-        # 2) Extract cloud.video.taobao.com MP4
-        # ─────────────────────────────────────────────
-        m = re.findall(r'(https:\\/\\/cloud\.video\.taobao\.com[^\"]+)', html)
-        if m:
-            clean = m[0].replace("\\/", "/")
-            print(f"[OK] taobao cloudvideo → {clean}")
-            return clean
-
-        # Clean non-escaped version as fallback
-        m2 = re.findall(r'https://cloud\.video\.taobao\.com[^\"]+', html)
-        if m2:
-            print(f"[OK] taobao cloudvideo fallback → {m2[0]}")
-            return m2[0]
-
-        # ─────────────────────────────────────────────
-        # 3) Old “videoUrl” pattern
-        # ─────────────────────────────────────────────
-        m3 = re.findall(r'"videoUrl":"(.*?)"', html)
-        if m3:
-            video_url = m3[0].replace("\\u002F", "/")
-            print(f"[OK] videoUrl → {video_url}")
-            return video_url
-
-        print("[WARN] No AliExpress video found.")
-        return None
+        print(f"[OK] Download complete → {save_path}")
+        return save_path
 
     except Exception as e:
-        print(f"[ERROR] AliExpress extractor error → {e}")
-        return None
+        raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
+
 
 # ─────────────────────────────────────────────
 # DOWNLOAD Video (TikTok, Instagram, AliExpress)
