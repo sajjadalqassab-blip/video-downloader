@@ -1,6 +1,8 @@
 import os
 import time
-import json   # ✅ ADD THIS LINE
+import json
+import re
+import requests
 import yt_dlp
 import psutil
 from fastapi import FastAPI, HTTPException, Request
@@ -20,7 +22,7 @@ GOOGLE_CREDS_JSON = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
 DRIVE_FOLDER_ID = os.getenv("DRIVE_FOLDER_ID")
 MAKE_FILE_PUBLIC = os.getenv("MAKE_FILE_PUBLIC", "true").lower() == "true"
 
-app = FastAPI(title="TikTok Video Downloader + Google Drive Uploader")
+app = FastAPI(title="Video Downloader + Google Drive Uploader")
 
 print(f"[DEBUG] DRIVE_FOLDER_ID   = {DRIVE_FOLDER_ID}")
 print(f"[DEBUG] MAKE_FILE_PUBLIC  = {MAKE_FILE_PUBLIC}")
@@ -35,6 +37,7 @@ try:
     print("[OK] Loaded Google credentials from environment JSON ✅")
 except Exception as e:
     raise RuntimeError(f"❌ Failed to parse credentials JSON: {e}")
+
 # ─────────────────────────────────────────────
 # Safe delete (handles Windows file locks)
 # ─────────────────────────────────────────────
@@ -60,11 +63,6 @@ def safe_delete(path: str):
 # Google Drive auth
 # ─────────────────────────────────────────────
 def get_drive_service():
-    """
-    Build Drive service using either:
-    1) GOOGLE_APPLICATION_CREDENTIALS_JSON (full JSON string)  ← for Render
-    2) GOOGLE_APPLICATION_CREDENTIALS (path to .json file)     ← for local
-    """
     creds_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
     creds_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
 
@@ -79,7 +77,7 @@ def get_drive_service():
         return build("drive", "v3", credentials=creds, cache_discovery=False)
 
     if not creds_path or not os.path.exists(creds_path):
-        raise HTTPException(status_code=500, detail="No Drive credentials found. Provide GOOGLE_APPLICATION_CREDENTIALS_JSON or GOOGLE_APPLICATION_CREDENTIALS.")
+        raise HTTPException(status_code=500, detail="No Drive credentials found.")
 
     creds = service_account.Credentials.from_service_account_file(
         creds_path, scopes=["https://www.googleapis.com/auth/drive"]
@@ -95,7 +93,7 @@ def upload_to_drive(file_path: str, folder_id: str):
     if not os.path.exists(file_path):
         raise HTTPException(status_code=400, detail=f"File not found: {file_path}")
 
-    # Verify folder access (important for Shared Drives)
+    # Verify folder access
     try:
         folder_meta = service.files().get(
             fileId=folder_id,
@@ -104,8 +102,6 @@ def upload_to_drive(file_path: str, folder_id: str):
         ).execute()
         if folder_meta.get("trashed"):
             raise HTTPException(status_code=400, detail="Target folder is in Trash")
-        if folder_meta.get("mimeType") != "application/vnd.google-apps.folder":
-            raise HTTPException(status_code=400, detail="Target ID is not a folder")
         print(f"[OK] Target folder: {folder_meta['name']} (driveId={folder_meta.get('driveId')})")
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"Cannot access folder {folder_id}: {e}")
@@ -135,15 +131,12 @@ def upload_to_drive(file_path: str, folder_id: str):
             print(f"[OK] Uploaded successfully → {file_id}")
 
             if MAKE_FILE_PUBLIC:
-                try:
-                    service.permissions().create(
-                        fileId=file_id,
-                        body={"role": "reader", "type": "anyone"},
-                        supportsAllDrives=True,
-                    ).execute()
-                    print("[OK] File made public.")
-                except Exception as pe:
-                    print(f"[WARN] Failed to make file public: {pe}")
+                service.permissions().create(
+                    fileId=file_id,
+                    body={"role": "reader", "type": "anyone"},
+                    supportsAllDrives=True,
+                ).execute()
+                print("[OK] File made public.")
 
             return response
         except Exception as e:
@@ -153,23 +146,58 @@ def upload_to_drive(file_path: str, folder_id: str):
     raise HTTPException(status_code=502, detail="Drive upload failed after 5 attempts")
 
 # ─────────────────────────────────────────────
+# AliExpress video extractor
 # ─────────────────────────────────────────────
-# Download TikTok / Instagram / AliExpress video (Option 1 enhanced)
+def extract_aliexpress_video(url: str) -> str:
+    print(f"[INFO] Trying AliExpress extractor → {url}")
+
+    try:
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/115.0 Safari/537.36"
+            )
+        }
+
+        html = requests.get(url, headers=headers, timeout=15).text
+        matches = re.findall(r'"videoUrl":"(.*?)"', html)
+
+        if matches:
+            video_url = matches[0].replace("\\u002F", "/")
+            print(f"[OK] AliExpress video found → {video_url}")
+            return video_url
+
+        print("[WARN] No video found in AliExpress page.")
+        return None
+
+    except Exception as e:
+        print(f"[ERROR] AliExpress extractor error: {e}")
+        return None
+
+# ─────────────────────────────────────────────
+# Download TikTok / Instagram / AliExpress
 # ─────────────────────────────────────────────
 def download_tiktok_video(url: str, filename: str):
     save_path = os.path.join(os.getcwd(), f"{filename}.mp4")
     print(f"[INFO] Downloading {url}")
 
+    # AliExpress detection
+    if "aliexpress.com" in url or "aliexpress.us" in url:
+        ae_video = extract_aliexpress_video(url)
+        if not ae_video:
+            raise HTTPException(status_code=500, detail="AliExpress: No downloadable video found")
+        url = ae_video  # override with direct CDN video
+
     ydl_opts = {
         "outtmpl": save_path,
         "format": "best",
-        "quiet": False,                  # show logs (useful on Render)
+        "quiet": False,
         "no_warnings": True,
         "ignoreerrors": True,
         "noprogress": True,
         "merge_output_format": "mp4",
-        "source_address": "0.0.0.0",     # avoids IPv6 issues
-        "force_generic_extractor": False, # do NOT use fallback random extractor
+        "source_address": "0.0.0.0",
+        "force_generic_extractor": False,
         "http_headers": {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -181,12 +209,13 @@ def download_tiktok_video(url: str, filename: str):
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
-        time.sleep(2)  # ensure file handle released
-        print(f"[OK] Download complete → {save_path}")
+
+        time.sleep(2)
 
         if not os.path.exists(save_path):
             raise HTTPException(status_code=500, detail="Download failed: file not created")
 
+        print(f"[OK] Download complete → {save_path}")
         return save_path
 
     except Exception as e:
@@ -198,7 +227,7 @@ def download_tiktok_video(url: str, filename: str):
 @app.post("/download")
 def download_and_upload(request: dict):
     url = request.get("url")
-    filename = request.get("filename", "tiktok_video")
+    filename = request.get("filename", "video")
 
     if not url:
         raise HTTPException(status_code=400, detail="Missing 'url' in request body")
@@ -207,7 +236,7 @@ def download_and_upload(request: dict):
 
     try:
         response = upload_to_drive(local_file, DRIVE_FOLDER_ID)
-        time.sleep(2)
+        time.sleep(1)
         safe_delete(local_file)
         return {"status": "success", "drive_response": response}
     except Exception as e:
@@ -221,8 +250,3 @@ def download_and_upload(request: dict):
 async def exception_handler(request: Request, exc: Exception):
     print(f"[ERROR] {exc}")
     return JSONResponse(status_code=500, content={"detail": str(exc)})
-
-# ─────────────────────────────────────────────
-# Run manually:
-# uvicorn main:app --reload --port 8000
-# ─────────────────────────────────────────────
