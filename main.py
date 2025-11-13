@@ -121,53 +121,69 @@ def extract_aliexpress_video(url: str) -> str:
     }
 
     try:
-        html = requests.get(url, headers=headers, timeout=20).text
+        # Get raw HTML
+        r = requests.get(url, headers=headers, timeout=20)
+        html = r.text
 
-        # 1) Extract video data from runParams JSON blob
-        json_blob = re.search(r'window\.runParams\s*=\s*(\{.*?\});', html)
-        if json_blob:
+        # ─────────────────────────────────────────────
+        # 1) Extract ANY JSON in runParams (even minified)
+        # ─────────────────────────────────────────────
+        json_candidates = re.findall(
+            r'runParams\s*=\s*(\{.*?\})\s*;',
+            html,
+            re.DOTALL
+        )
+
+        for blob in json_candidates:
             try:
-                data = json.loads(json_blob.group(1))
+                data = json.loads(blob)
 
-                # Path: data → props → video → url
+                # Path #1: data.props.video.url
                 video_url = (
                     data.get("data", {})
                         .get("props", {})
                         .get("video", {})
                         .get("url")
                 )
-
                 if video_url:
-                    print(f"[OK] AliExpress JSON video → {video_url}")
+                    print(f"[OK] runParams → video.url → {video_url}")
                     return video_url
 
-                # Some versions store it under "videos" list
+                # Path #2: data.props.videos[0].src
                 videos = (
                     data.get("data", {})
                         .get("props", {})
                         .get("videos", [])
                 )
+                if isinstance(videos, list) and videos and "src" in videos[0]:
+                    print(f"[OK] runParams → videos[0].src → {videos[0]['src']}")
+                    return videos[0]["src"]
 
-                if isinstance(videos, list) and len(videos) > 0:
-                    if "src" in videos[0]:
-                        print(f"[OK] AliExpress JSON list video → {videos[0]['src']}")
-                        return videos[0]["src"]
+            except Exception:
+                pass
 
-            except Exception as e:
-                print(f"[WARN] JSON parse failed: {e}")
-
-        # 2) Look for cloudvideo CDN URLs
-        matches = re.findall(r'https:\\/\\/cloudvideo[a-zA-Z0-9\\.\\/\\-_]+', html)
-        if matches:
-            clean = matches[0].replace("\\/", "/")
-            print(f"[OK] AliExpress cloudvideo → {clean}")
+        # ─────────────────────────────────────────────
+        # 2) Extract cloud.video.taobao.com MP4
+        # ─────────────────────────────────────────────
+        m = re.findall(r'(https:\\/\\/cloud\.video\.taobao\.com[^\"]+)', html)
+        if m:
+            clean = m[0].replace("\\/", "/")
+            print(f"[OK] taobao cloudvideo → {clean}")
             return clean
 
-        # 3) Old "videoUrl" format
-        matches = re.findall(r'"videoUrl":"(.*?)"', html)
-        if matches:
-            video_url = matches[0].replace("\\u002F", "/")
-            print(f"[OK] AliExpress fallback video → {video_url}")
+        # Clean non-escaped version as fallback
+        m2 = re.findall(r'https://cloud\.video\.taobao\.com[^\"]+', html)
+        if m2:
+            print(f"[OK] taobao cloudvideo fallback → {m2[0]}")
+            return m2[0]
+
+        # ─────────────────────────────────────────────
+        # 3) Old “videoUrl” pattern
+        # ─────────────────────────────────────────────
+        m3 = re.findall(r'"videoUrl":"(.*?)"', html)
+        if m3:
+            video_url = m3[0].replace("\\u002F", "/")
+            print(f"[OK] videoUrl → {video_url}")
             return video_url
 
         print("[WARN] No AliExpress video found.")
