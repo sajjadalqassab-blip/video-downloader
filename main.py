@@ -153,23 +153,42 @@ def upload_to_drive(file_path: str, folder_id: str):
     raise HTTPException(status_code=502, detail="Drive upload failed after 5 attempts")
 
 # ─────────────────────────────────────────────
-# Download TikTok video
+# ─────────────────────────────────────────────
+# Download TikTok / Instagram / AliExpress video (Option 1 enhanced)
 # ─────────────────────────────────────────────
 def download_tiktok_video(url: str, filename: str):
     save_path = os.path.join(os.getcwd(), f"{filename}.mp4")
     print(f"[INFO] Downloading {url}")
+
     ydl_opts = {
         "outtmpl": save_path,
-        "quiet": True,
+        "format": "best",
+        "quiet": False,                  # show logs (useful on Render)
+        "no_warnings": True,
+        "ignoreerrors": True,
         "noprogress": True,
+        "merge_output_format": "mp4",
+        "source_address": "0.0.0.0",     # avoids IPv6 issues
+        "force_generic_extractor": False, # do NOT use fallback random extractor
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/108.0 Safari/537.36"
+            )
+        }
     }
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
-        time.sleep(2)  # ensure file handle released on Windows
+        time.sleep(2)  # ensure file handle released
         print(f"[OK] Download complete → {save_path}")
+
+        if not os.path.exists(save_path):
+            raise HTTPException(status_code=500, detail="Download failed: file not created")
+
         return save_path
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Download failed: {e}")
 
