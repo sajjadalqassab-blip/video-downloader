@@ -121,17 +121,49 @@ def extract_aliexpress_video(url: str) -> str:
     }
 
     try:
-        html = requests.get(url, headers=headers, timeout=15).text
+        html = requests.get(url, headers=headers, timeout=20).text
 
-        # NEW reliable method → extract ANY AliExpress video link
-        possible_links = re.findall(r'https:\\/\\/cloudvideo[a-zA-Z0-9\\.\\/\\-_]+', html)
+        # 1) Extract video data from runParams JSON blob
+        json_blob = re.search(r'window\.runParams\s*=\s*(\{.*?\});', html)
+        if json_blob:
+            try:
+                data = json.loads(json_blob.group(1))
 
-        if possible_links:
-            clean_url = possible_links[0].replace("\\/", "/")
-            print(f"[OK] AliExpress video found → {clean_url}")
-            return clean_url
+                # Path: data → props → video → url
+                video_url = (
+                    data.get("data", {})
+                        .get("props", {})
+                        .get("video", {})
+                        .get("url")
+                )
 
-        # Fallback method (videoUrl)
+                if video_url:
+                    print(f"[OK] AliExpress JSON video → {video_url}")
+                    return video_url
+
+                # Some versions store it under "videos" list
+                videos = (
+                    data.get("data", {})
+                        .get("props", {})
+                        .get("videos", [])
+                )
+
+                if isinstance(videos, list) and len(videos) > 0:
+                    if "src" in videos[0]:
+                        print(f"[OK] AliExpress JSON list video → {videos[0]['src']}")
+                        return videos[0]["src"]
+
+            except Exception as e:
+                print(f"[WARN] JSON parse failed: {e}")
+
+        # 2) Look for cloudvideo CDN URLs
+        matches = re.findall(r'https:\\/\\/cloudvideo[a-zA-Z0-9\\.\\/\\-_]+', html)
+        if matches:
+            clean = matches[0].replace("\\/", "/")
+            print(f"[OK] AliExpress cloudvideo → {clean}")
+            return clean
+
+        # 3) Old "videoUrl" format
         matches = re.findall(r'"videoUrl":"(.*?)"', html)
         if matches:
             video_url = matches[0].replace("\\u002F", "/")
@@ -144,7 +176,6 @@ def extract_aliexpress_video(url: str) -> str:
     except Exception as e:
         print(f"[ERROR] AliExpress extractor error → {e}")
         return None
-
 
 # ─────────────────────────────────────────────
 # DOWNLOAD Video (TikTok, Instagram, AliExpress)
