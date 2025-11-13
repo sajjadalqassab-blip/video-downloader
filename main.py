@@ -1,8 +1,6 @@
 import os
 import time
 import json
-import re
-import requests
 import yt_dlp
 import psutil
 from fastapi import FastAPI, HTTPException, Request
@@ -26,7 +24,9 @@ app = FastAPI(title="Video Downloader + Google Drive Uploader")
 print(f"[DEBUG] DRIVE_FOLDER_ID   = {DRIVE_FOLDER_ID}")
 print(f"[DEBUG] MAKE_FILE_PUBLIC  = {MAKE_FILE_PUBLIC}")
 
-# Parse creds
+# ─────────────────────────────────────────────
+# Parse credentials from JSON env var
+# ─────────────────────────────────────────────
 if not GOOGLE_CREDS_JSON:
     raise RuntimeError("❌ Missing GOOGLE_APPLICATION_CREDENTIALS_JSON environment variable")
 
@@ -36,7 +36,6 @@ try:
     print("[OK] Loaded Google credentials from environment JSON ✅")
 except Exception as e:
     raise RuntimeError(f"❌ Failed to parse credentials JSON: {e}")
-
 
 # ─────────────────────────────────────────────
 # Safe delete
@@ -48,16 +47,23 @@ def safe_delete(path: str):
             print(f"[OK] Deleted local file: {path}")
             return
         except PermissionError:
-            print(f"[WARN] File locked (attempt {i+1}/10)...")
+            print(f"[WARN] File still in use (attempt {i+1}/10)...")
+            for proc in psutil.process_iter(['pid', 'name']):
+                try:
+                    for f in proc.open_files():
+                        if f.path == path:
+                            print(f"⚠ Locked by process: {proc.name()} (PID {proc.pid})")
+                except Exception:
+                    pass
             time.sleep(1)
     print(f"[FAIL] Could not delete: {path}")
 
-
 # ─────────────────────────────────────────────
-# Google Drive service
+# Google Drive auth
 # ─────────────────────────────────────────────
 def get_drive_service():
     creds_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+    creds_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
 
     if creds_json:
         info = json.loads(creds_json)
@@ -66,55 +72,74 @@ def get_drive_service():
         )
         return build("drive", "v3", credentials=creds, cache_discovery=False)
 
-    raise HTTPException(status_code=500, detail="No credentials found")
+    if creds_path and os.path.exists(creds_path):
+        creds = service_account.Credentials.from_service_account_file(
+            creds_path, scopes=["https://www.googleapis.com/auth/drive"]
+        )
+        return build("drive", "v3", credentials=creds, cache_discovery=False)
 
+    raise HTTPException(status_code=500, detail="No valid Google Drive credentials available")
 
 # ─────────────────────────────────────────────
-# Upload file to Drive
+# Upload to Google Drive
 # ─────────────────────────────────────────────
 def upload_to_drive(file_path: str, folder_id: str):
     service = get_drive_service()
 
     if not os.path.exists(file_path):
-        raise HTTPException(status_code=400, detail="File not found")
+        raise HTTPException(status_code=400, detail=f"File not found: {file_path}")
+
+    # Check folder access
+    try:
+        folder_meta = service.files().get(
+            fileId=folder_id,
+            fields="id,name,mimeType,driveId,trashed",
+            supportsAllDrives=True,
+        ).execute()
+        print(f"[OK] Uploading into folder: {folder_meta['name']} (driveId={folder_meta.get('driveId')})")
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"Cannot access folder {folder_id}: {e}")
 
     file_metadata = {"name": os.path.basename(file_path), "parents": [folder_id]}
     media = MediaFileUpload(file_path, mimetype="video/mp4", resumable=True)
 
-    request_upload = service.files().create(
-        body=file_metadata,
-        media_body=media,
-        fields="id,webViewLink,webContentLink",
-        supportsAllDrives=True,
-    )
+    for attempt in range(1, 6):
+        try:
+            print(f"[INFO] Upload attempt {attempt}/5 → {file_path}")
+            request = service.files().create(
+                body=file_metadata,
+                media_body=media,
+                fields="id,webViewLink,webContentLink",
+                supportsAllDrives=True,
+            )
+            response = None
+            while response is None:
+                _, response = request.next_chunk()
+            print(f"[OK] File uploaded → {response['id']}")
 
-    response = None
-    while response is None:
-        status, response = request_upload.next_chunk()
-        if status:
-            print(f"[UPLOAD] {int(status.progress() * 100)}%")
+            # Make public
+            if MAKE_FILE_PUBLIC:
+                service.permissions().create(
+                    fileId=response["id"],
+                    body={"role": "reader", "type": "anyone"},
+                    supportsAllDrives=True,
+                ).execute()
+                print("[OK] File made public.")
 
-    file_id = response["id"]
-    print(f"[OK] Uploaded → {file_id}")
+            return response
+        except Exception as e:
+            print(f"[WARN] Upload failed (attempt {attempt}/5): {e}")
+            time.sleep(attempt * 5)
 
-    if MAKE_FILE_PUBLIC:
-        service.permissions().create(
-            fileId=file_id,
-            body={"role": "reader", "type": "anyone"},
-            supportsAllDrives=True,
-        ).execute()
-
-    return response
-
+    raise HTTPException(status_code=502, detail="Upload failed after 5 attempts")
 
 # ─────────────────────────────────────────────
-# AliExpress Video Extractor (FINAL WORKING VERSION)
+# Universal video downloader (TikTok/Instagram/AliExpress)
 # ─────────────────────────────────────────────
 def download_tiktok_video(url: str, filename: str):
     save_path = os.path.join(os.getcwd(), f"{filename}.mp4")
     print(f"[INFO] Downloading {url}")
 
-    # Strong headers for AliExpress
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -128,85 +153,34 @@ def download_tiktok_video(url: str, filename: str):
         "outtmpl": save_path,
         "format": "bestvideo+bestaudio/best",
         "quiet": False,
+        "merge_output_format": "mp4",
         "ignoreerrors": True,
-        "merge_output_format": "mp4",
-        "noprogress": True,
         "http_headers": headers,
-        "force_generic_extractor": False,
-    }
-
-    # Detect AliExpress specifically
-    if "aliexpress." in url:
-        print("[INFO] Using yt-dlp AliExpress extractor...")
-        ydl_opts["extractor_args"] = {
-            "aliexpress": {
-                "language": ["en_US"],
-                "currency": ["USD"]
-            }
-        }
-
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            result = ydl.download([url])
-
-        time.sleep(2)
-
-        if not os.path.exists(save_path):
-            raise HTTPException(status_code=500, detail="Download failed: file not created")
-
-        print(f"[OK] Download complete → {save_path}")
-        return save_path
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
-
-
-# ─────────────────────────────────────────────
-# DOWNLOAD Video (TikTok, Instagram, AliExpress)
-# ─────────────────────────────────────────────
-def download_tiktok_video(url: str, filename: str):
-    save_path = os.path.join(os.getcwd(), f"{filename}.mp4")
-    print(f"[INFO] Downloading {url}")
-
-    # Handle AliExpress
-    if "aliexpress.com" in url or "aliexpress.us" in url:
-        ae_video = extract_aliexpress_video(url)
-        if not ae_video:
-            raise HTTPException(status_code=500, detail="AliExpress: No downloadable video found")
-        url = ae_video
-
-    # Normal downloader
-    ydl_opts = {
-        "outtmpl": save_path,
-        "format": "best",
-        "quiet": False,
-        "noprogress": True,
-        "merge_output_format": "mp4",
         "source_address": "0.0.0.0",
-        "http_headers": {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115 Safari/537.36"
-            )
-        }
     }
+
+    # Enable AliExpress extractor
+    if "aliexpress." in url:
+        print("[INFO] Enabling AliExpress extractor...")
+        ydl_opts["extractor_args"] = {
+            "aliexpress": {"language": ["en_US"], "currency": ["USD"]}
+        }
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
 
         if not os.path.exists(save_path):
-            raise HTTPException(status_code=500, detail="Download failed")
+            raise HTTPException(status_code=500, detail="Download failed: file not created")
 
-        print(f"[OK] Download complete → {save_path}")
+        print(f"[OK] Downloaded → {save_path}")
         return save_path
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Download failed: {e}")
-
+        raise HTTPException(status_code=500, detail=f"Download error: {e}")
 
 # ─────────────────────────────────────────────
-# API Route
+# API route
 # ─────────────────────────────────────────────
 @app.post("/download")
 def download_and_upload(request: dict):
@@ -214,17 +188,20 @@ def download_and_upload(request: dict):
     filename = request.get("filename", "video")
 
     if not url:
-        raise HTTPException(status_code=400, detail="Missing 'url'")
+        raise HTTPException(status_code=400, detail="Missing URL")
 
     local_file = download_tiktok_video(url, filename)
 
-    response = upload_to_drive(local_file, DRIVE_FOLDER_ID)
-    safe_delete(local_file)
-    return {"status": "success", "drive_response": response}
-
+    try:
+        response = upload_to_drive(local_file, DRIVE_FOLDER_ID)
+        safe_delete(local_file)
+        return {"status": "success", "drive_response": response}
+    except Exception as e:
+        safe_delete(local_file)
+        raise e
 
 # ─────────────────────────────────────────────
-# Error Handler
+# Global error handler
 # ─────────────────────────────────────────────
 @app.exception_handler(Exception)
 async def exception_handler(request: Request, exc: Exception):
