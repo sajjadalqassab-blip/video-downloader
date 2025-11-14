@@ -2,6 +2,7 @@ import os
 import time
 import json
 import yt_dlp
+import requests
 import psutil
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
