@@ -140,14 +140,47 @@ def download_tiktok_video(url: str, filename: str):
     save_path = os.path.join(os.getcwd(), f"{filename}.mp4")
     print(f"[INFO] Downloading {url}")
 
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36"
-        ),
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": url,
-    }
+    # --- AliExpress Fix: Force CN region & stop redirect to aliexpress.us ---
+    if "aliexpress." in url:
+        print("[INFO] Applying Anti-Redirect Patch for AliExpress...")
+        
+        # Force CN region (prevents redirect)
+        cookies = {
+            "aep_usuc_f": "site=glo&c_tp=USD&region=CN&b_locale=en_US"
+        }
+
+        # Force Accept-Language = CN/EN
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36"
+            ),
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.aliexpress.com/",
+        }
+
+        # Get fixed .com URL (prevents .us redirect)
+        try:
+            r = requests.get(url, headers=headers, cookies=cookies, timeout=15, allow_redirects=False)
+            if r.status_code in (301, 302) and "aliexpress.us" in r.headers.get("Location", ""):
+                print("[WARN] AliExpress redirect detected → forcing .com")
+                url = url.replace("aliexpress.us", "aliexpress.com")
+        except Exception as e:
+            print(f"[WARN] Anti-redirect check failed: {e}")
+
+    else:
+        # Normal behavior for TikTok/Instagram
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36"
+            ),
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+
+        cookies = {}
+
+    # ---------------------------------------------------------------------
 
     ydl_opts = {
         "outtmpl": save_path,
@@ -156,12 +189,12 @@ def download_tiktok_video(url: str, filename: str):
         "merge_output_format": "mp4",
         "ignoreerrors": True,
         "http_headers": headers,
+        "cookies": cookies,
         "source_address": "0.0.0.0",
     }
 
-    # Enable AliExpress extractor
-    if "aliexpress." in url:
-        print("[INFO] Enabling AliExpress extractor...")
+    # Enable official AliExpress extractor (now works because redirect blocked)
+    if "aliexpress" in url:
         ydl_opts["extractor_args"] = {
             "aliexpress": {"language": ["en_US"], "currency": ["USD"]}
         }
@@ -178,7 +211,6 @@ def download_tiktok_video(url: str, filename: str):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Download error: {e}")
-
 # ─────────────────────────────────────────────
 # API route
 # ─────────────────────────────────────────────
