@@ -1,8 +1,9 @@
 import os
 import time
 import json
-import yt_dlp
+import re
 import requests
+import yt_dlp
 import psutil
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -38,8 +39,9 @@ try:
 except Exception as e:
     raise RuntimeError(f"❌ Failed to parse credentials JSON: {e}")
 
+
 # ─────────────────────────────────────────────
-# Safe delete
+# Safe delete (handles Windows file locks)
 # ─────────────────────────────────────────────
 def safe_delete(path: str):
     for i in range(10):
@@ -58,6 +60,7 @@ def safe_delete(path: str):
                     pass
             time.sleep(1)
     print(f"[FAIL] Could not delete: {path}")
+
 
 # ─────────────────────────────────────────────
 # Google Drive auth
@@ -81,6 +84,7 @@ def get_drive_service():
 
     raise HTTPException(status_code=500, detail="No valid Google Drive credentials available")
 
+
 # ─────────────────────────────────────────────
 # Upload to Google Drive
 # ─────────────────────────────────────────────
@@ -90,7 +94,7 @@ def upload_to_drive(file_path: str, folder_id: str):
     if not os.path.exists(file_path):
         raise HTTPException(status_code=400, detail=f"File not found: {file_path}")
 
-    # Check folder access
+    # Optional check that folder is accessible
     try:
         folder_meta = service.files().get(
             fileId=folder_id,
@@ -118,7 +122,6 @@ def upload_to_drive(file_path: str, folder_id: str):
                 _, response = request.next_chunk()
             print(f"[OK] File uploaded → {response['id']}")
 
-            # Make public
             if MAKE_FILE_PUBLIC:
                 service.permissions().create(
                     fileId=response["id"],
@@ -134,54 +137,118 @@ def upload_to_drive(file_path: str, folder_id: str):
 
     raise HTTPException(status_code=502, detail="Upload failed after 5 attempts")
 
+
 # ─────────────────────────────────────────────
-# Universal video downloader (TikTok/Instagram/AliExpress)
+# AliExpress product video extractor (Option A)
+# ─────────────────────────────────────────────
+def extract_aliexpress_video(url: str) -> str:
+    """
+    Extracts the main PRODUCT video URL from an AliExpress product page
+    (works for .com and .us after redirect).
+    """
+    print(f"[INFO] Trying AliExpress HTML extractor → {url}")
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+
+    # Cookie to force global site (sometimes helps avoid weird variants)
+    cookies = {
+        "aep_usuc_f": "site=glo&region=SA&b_locale=en_US"
+    }
+
+    try:
+        r = requests.get(url, headers=headers, cookies=cookies, timeout=20)
+        html = r.text
+
+        # 1) Look for "videoInfos" JSON (main product videos)
+        m = re.search(r'"videoInfos"\s*:\s*(\[[^\]]+\])', html)
+        if m:
+            block = m.group(1)
+            # unescape common sequences
+            block = block.replace('\\u002F', '/')
+            block = block.replace('\\\\/', '/')
+
+            try:
+                video_infos = json.loads(block)
+                if isinstance(video_infos, list) and video_infos:
+                    vi = video_infos[0]
+                    # Common keys: videoUrl, src, url
+                    url_key = vi.get("videoUrl") or vi.get("src") or vi.get("url")
+                    if url_key:
+                        print(f"[OK] AliExpress videoInfos → {url_key}")
+                        return url_key
+            except Exception as e:
+                print(f"[WARN] Failed to parse videoInfos JSON: {e}")
+
+        # 2) Fallback: search for videoUrl anywhere in HTML
+        m2 = re.search(r'"videoUrl"\s*:\s*"(.*?)"', html)
+        if m2:
+            vid = m2.group(1).replace('\\u002F', '/').replace('\\\\/', '/')
+            print(f"[OK] AliExpress fallback videoUrl → {vid}")
+            return vid
+
+        # 3) Fallback: cloud.video.taobao.com CDN links
+        m3 = re.findall(r'https://cloud\.video\.taobao\.com[^\"]+', html)
+        if m3:
+            print(f"[OK] AliExpress taobao CDN → {m3[0]}")
+            return m3[0]
+
+        print("[WARN] No AliExpress product video found in HTML.")
+        return None
+
+    except Exception as e:
+        print(f"[ERROR] AliExpress extractor error: {e}")
+        return None
+
+
+# ─────────────────────────────────────────────
+# Universal video downloader
 # ─────────────────────────────────────────────
 def download_tiktok_video(url: str, filename: str):
     save_path = os.path.join(os.getcwd(), f"{filename}.mp4")
     print(f"[INFO] Downloading {url}")
 
-    # --- AliExpress Fix: Force CN region & stop redirect to aliexpress.us ---
-    if "aliexpress." in url:
-        print("[INFO] Applying Anti-Redirect Patch for AliExpress...")
-        
-        # Force CN region (prevents redirect)
-        cookies = {
-            "aep_usuc_f": "site=glo&c_tp=USD&region=CN&b_locale=en_US"
-        }
+    # ── AliExpress branch: HTML parse + direct MP4 download ──
+    if "aliexpress.com" in url or "aliexpress.us" in url:
+        video_direct = extract_aliexpress_video(url)
+        if not video_direct:
+            raise HTTPException(
+                status_code=500,
+                detail="AliExpress: No downloadable product video found"
+            )
 
-        # Force Accept-Language = CN/EN
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36"
-            ),
-            "Accept-Language": "en-US,en;q=0.9",
-            "Referer": "https://www.aliexpress.com/",
-        }
+        print(f"[INFO] AliExpress direct video URL → {video_direct}")
 
-        # Get fixed .com URL (prevents .us redirect)
         try:
-            r = requests.get(url, headers=headers, cookies=cookies, timeout=15, allow_redirects=False)
-            if r.status_code in (301, 302) and "aliexpress.us" in r.headers.get("Location", ""):
-                print("[WARN] AliExpress redirect detected → forcing .com")
-                url = url.replace("aliexpress.us", "aliexpress.com")
+            with requests.get(video_direct, stream=True, timeout=60) as r:
+                if r.status_code != 200:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"AliExpress video download failed (status {r.status_code})"
+                    )
+                with open(save_path, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            f.write(chunk)
+            print(f"[OK] AliExpress video saved → {save_path}")
+            return save_path
         except Exception as e:
-            print(f"[WARN] Anti-redirect check failed: {e}")
+            raise HTTPException(status_code=500, detail=f"AliExpress direct download error: {e}")
 
-    else:
-        # Normal behavior for TikTok/Instagram
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36"
-            ),
-            "Accept-Language": "en-US,en;q=0.9",
-        }
-
-        cookies = {}
-
-    # ---------------------------------------------------------------------
+    # ── Normal branch: TikTok / Instagram / others via yt_dlp ──
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": url,
+    }
 
     ydl_opts = {
         "outtmpl": save_path,
@@ -190,15 +257,8 @@ def download_tiktok_video(url: str, filename: str):
         "merge_output_format": "mp4",
         "ignoreerrors": True,
         "http_headers": headers,
-        "cookies": cookies,
         "source_address": "0.0.0.0",
     }
-
-    # Enable official AliExpress extractor (now works because redirect blocked)
-    if "aliexpress" in url:
-        ydl_opts["extractor_args"] = {
-            "aliexpress": {"language": ["en_US"], "currency": ["USD"]}
-        }
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -212,6 +272,8 @@ def download_tiktok_video(url: str, filename: str):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Download error: {e}")
+
+
 # ─────────────────────────────────────────────
 # API route
 # ─────────────────────────────────────────────
@@ -232,6 +294,7 @@ def download_and_upload(request: dict):
     except Exception as e:
         safe_delete(local_file)
         raise e
+
 
 # ─────────────────────────────────────────────
 # Global error handler
