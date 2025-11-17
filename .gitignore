@@ -1,4 +1,6 @@
 ﻿venv/
+google-creds.json
+cert.pem
 .env
 *.pyc
 __pycache__/
