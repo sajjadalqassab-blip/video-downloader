@@ -102,6 +102,17 @@ def download_with_ytdlp(url: str) -> str:
         "noplaylist": True,
     }
 
+    # ========== INSTAGRAM COOKIES SUPPORT ==========
+    ig_cookies = os.getenv("IG_COOKIES")
+
+    if "instagram.com" in url and ig_cookies:
+        cookies_path = "/tmp/ig_cookies.txt"
+        with open(cookies_path, "w") as f:
+            f.write(ig_cookies)
+        ydl_opts["cookiefile"] = cookies_path
+        print("[INFO] Instagram cookies loaded for yt-dlp")
+    # ===============================================
+
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
@@ -109,7 +120,7 @@ def download_with_ytdlp(url: str) -> str:
         print("[ERROR] yt-dlp failed:", str(e))
         return None
 
-    print(f"[OK] Downloaded → {outfile}")
+    print(f"[OK] yt-dlp download complete → {outfile}")
     return outfile
 
 
