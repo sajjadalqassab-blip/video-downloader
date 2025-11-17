@@ -1,208 +1,187 @@
 import os
-import time
-import json
+import uuid
 import requests
-import re
-import psutil
 import yt_dlp
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+# Google Drive
+from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
-from google.oauth2 import service_account
-from dotenv import load_dotenv
 
-# ─────────────────────────────────────────────
-# Load environment variables
-# ─────────────────────────────────────────────
-load_dotenv()
+# Playwright
+from playwright.sync_api import sync_playwright
 
-GOOGLE_CREDS_JSON = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
-DRIVE_FOLDER_ID = os.getenv("DRIVE_FOLDER_ID")
-MAKE_FILE_PUBLIC = os.getenv("MAKE_FILE_PUBLIC", "true").lower() == "true"
+# ============== CONFIG ==============
+DRIVE_FOLDER_ID = "15slyKToMudp-SOHQx0FONS5r9HsXPE_3"
 
-app = FastAPI(title="Video Downloader + Drive Uploader")
+# Render stores secrets in /etc/secrets/...
+CREDS_PATH = "/etc/secrets/GOOGLE_CREDS"
 
-print(f"[DEBUG] DRIVE_FOLDER_ID = {DRIVE_FOLDER_ID}")
+# ============== FASTAPI ==============
+app = FastAPI()
 
-# ─────────────────────────────────────────────
-# Google Credentials
-# ─────────────────────────────────────────────
-if not GOOGLE_CREDS_JSON:
-    raise RuntimeError("Missing GOOGLE_APPLICATION_CREDENTIALS_JSON")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-try:
-    creds_dict = json.loads(GOOGLE_CREDS_JSON)
-    creds = service_account.Credentials.from_service_account_info(creds_dict)
-    print("[OK] Google credentials loaded")
-except Exception as e:
-    raise RuntimeError(f"Invalid Google credentials JSON: {e}")
+class DownloadRequest(BaseModel):
+    url: str
+    filename: str | None = None
 
-# ─────────────────────────────────────────────
-# Safe delete
-# ─────────────────────────────────────────────
-def safe_delete(path: str):
-    for i in range(10):
-        try:
-            os.remove(path)
-            print(f"[OK] Deleted {path}")
-            return
-        except Exception:
-            time.sleep(1)
-    print(f"[FAIL] Could not delete {path}")
+# ============== ALIEXPRESS EXTRACTOR ==============
+def extract_aliexpress_video(url: str) -> str:
+    print(f"[INFO] Extracting AliExpress video → {url}")
 
-# ─────────────────────────────────────────────
-# Google Drive Service
-# ─────────────────────────────────────────────
-def get_drive_service():
-    info = json.loads(GOOGLE_CREDS_JSON)
-    creds = service_account.Credentials.from_service_account_info(
-        info, scopes=["https://www.googleapis.com/auth/drive"]
-    )
-    return build("drive", "v3", credentials=creds, cache_discovery=False)
-
-# ─────────────────────────────────────────────
-# Upload to Drive
-# ─────────────────────────────────────────────
-def upload_to_drive(file_path: str, folder_id: str):
-    service = get_drive_service()
-
-    if not os.path.exists(file_path):
-        raise HTTPException(400, "File not found")
-
-    # Validate folder
-    try:
-        folder = service.files().get(
-            fileId=folder_id,
-            fields="id,name",
-            supportsAllDrives=True
-        ).execute()
-        print(f"[OK] Uploading to folder: {folder['name']}")
-    except Exception as e:
-        raise HTTPException(404, f"Cannot access folder: {e}")
-
-    metadata = {"name": os.path.basename(file_path), "parents": [folder_id]}
-    media = MediaFileUpload(file_path, resumable=True)
-
-    for attempt in range(1, 6):
-        try:
-            print(f"[INFO] Upload attempt {attempt}/5")
-            req = service.files().create(
-                body=metadata,
-                media_body=media,
-                supportsAllDrives=True,
-                fields="id,webViewLink,webContentLink"
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
             )
-            response = None
-            while response is None:
-                status, response = req.next_chunk()
-                if status:
-                    print(f"[UPLOAD] {int(status.progress()*100)}%")
-            print("[OK] Upload complete")
+        )
 
-            if MAKE_FILE_PUBLIC:
-                service.permissions().create(
-                    fileId=response["id"],
-                    body={"role": "reader", "type": "anyone"},
-                    supportsAllDrives=True
-                ).execute()
+        page.goto(url, timeout=60000, wait_until="networkidle")
 
-            return response
+        # Scroll to load videos
+        for _ in range(12):
+            page.evaluate("window.scrollBy(0, 1000)")
+            page.wait_for_timeout(400)
 
-        except Exception as e:
-            print(f"[WARN] Upload failed: {e}")
-            time.sleep(attempt * 5)
+        video_sources = []
 
-    raise HTTPException(502, "Upload failed after 5 retries")
+        # video source tags
+        try:
+            sources = page.query_selector_all("video source")
+            for s in sources:
+                src = s.get_attribute("src")
+                if src and src.startswith("http"):
+                    video_sources.append(src)
+        except:
+            pass
 
-# ─────────────────────────────────────────────
-# Download TikTok / IG / AliExpress
-# ─────────────────────────────────────────────
-def download_video(url: str, filename: str):
-    save_path = os.path.join(os.getcwd(), f"{filename}.mp4")
-    print(f"[INFO] Downloading → {url}")
+        # <video src="">
+        try:
+            videos = page.query_selector_all("video")
+            for v in videos:
+                src = v.get_attribute("src")
+                if src and src.startswith("http"):
+                    video_sources.append(src)
+        except:
+            pass
 
-    is_ae = ("aliexpress.com" in url) or ("aliexpress.us" in url)
+        browser.close()
 
-    # Global headers for spoofing browser
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/120 Safari/537.36"
-        ),
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://www.aliexpress.com/",
-    }
+        if video_sources:
+            print(f"[OK] AliExpress video found: {video_sources[0]}")
+            return video_sources[0]
 
-    # Region override cookies to bypass US redirect
-    cookies = {"aep_usuc_f": "site=glo&region=SA&b_locale=en_US"}
+        print("[WARN] No AliExpress video found")
+        return None
+
+
+# ============== YT-DLP DOWNLOADER ==============
+def download_with_ytdlp(url: str) -> str:
+    print(f"[INFO] Downloading via yt-dlp → {url}")
+
+    outfile = f"{uuid.uuid4()}.mp4"
 
     ydl_opts = {
-        "outtmpl": save_path,
-        "format": "bestvideo+bestaudio/best",
-        "merge_output_format": "mp4",
+        "outtmpl": outfile,
+        "format": "mp4",
         "quiet": False,
-        "source_address": "0.0.0.0",
-        "http_headers": headers,
-        "geo_bypass": True,
-        "geo_bypass_country": "CN",
-        "ignoreerrors": True,
-
-        # AliExpress hack
-        "extractor_args": {
-            "generic": {"force_generic_extractor": ["True"]},
-            "aliexpress": {
-                "use_webpage_url": ["True"],
-                "retries": ["5"],
-                "player_client": ["desktop"],
-            },
-        },
+        "no_warnings": False,
+        "noplaylist": True,
     }
-
-    # ❌ Removed → ydl_opts["cookiesfrombrowser"] = ("chrome",)
-    # Render has no Chrome
-
-    if is_ae:
-        print("[INFO] Using AliExpress extractor override")
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
-
-        if not os.path.exists(save_path):
-            raise HTTPException(500, "Download failed: file missing")
-
-        print(f"[OK] Saved → {save_path}")
-        return save_path
-
     except Exception as e:
-        raise HTTPException(500, f"Download failed: {e}")
+        print("[ERROR] yt-dlp failed:", str(e))
+        return None
 
-# ─────────────────────────────────────────────
-# API Route
-# ─────────────────────────────────────────────
+    print(f"[OK] Downloaded → {outfile}")
+    return outfile
+
+
+# ============== GOOGLE DRIVE UPLOAD ==============
+def upload_to_drive(local_path, filename):
+    creds = Credentials.from_service_account_file(
+        CREDS_PATH,
+        scopes=["https://www.googleapis.com/auth/drive"]
+    )
+
+    drive_service = build("drive", "v3", credentials=creds)
+
+    metadata = {
+        "name": filename,
+        "parents": [DRIVE_FOLDER_ID]
+    }
+
+    media = MediaFileUpload(local_path, mimetype="video/mp4", resumable=False)
+
+    uploaded = drive_service.files().create(
+        body=metadata,
+        media_body=media,
+        fields="id,webContentLink,webViewLink",
+        supportsAllDrives=True
+    ).execute()
+
+    return uploaded
+
+
+# ============== MAIN ENDPOINT ==============
 @app.post("/download")
-def download_and_upload(request: dict):
-    url = request.get("url")
-    filename = request.get("filename", "video")
+def download_video(request: DownloadRequest):
+    url = request.url.strip()
+    print(f"[INFO] Request → {url}")
 
-    if not url:
-        raise HTTPException(400, "Missing 'url'")
+    local_file = None
 
-    local_file = download_video(url, filename)
+    # 1 — AliExpress
+    if "aliexpress.com" in url:
+        video_url = extract_aliexpress_video(url)
+        if not video_url:
+            raise HTTPException(status_code=500, detail="AliExpress video not found")
 
+        filename = f"{uuid.uuid4()}.mp4"
+        local_path = filename
+
+        try:
+            r = requests.get(video_url, stream=True, timeout=60)
+            with open(local_path, "wb") as f:
+                for chunk in r.iter_content(1024 * 1024):
+                    f.write(chunk)
+            local_file = local_path
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Download failed: {e}")
+
+    else:
+        # 2 — TikTok, Instagram, Facebook, etc.
+        local_file = download_with_ytdlp(url)
+        if not local_file:
+            raise HTTPException(status_code=500, detail="yt-dlp failed")
+
+    # Upload to Drive
+    uploaded = upload_to_drive(local_file, os.path.basename(local_file))
+
+    # Delete local file
     try:
-        drive_resp = upload_to_drive(local_file, DRIVE_FOLDER_ID)
-        safe_delete(local_file)
-        return {"status": "success", "drive": drive_resp}
-    except Exception as e:
-        safe_delete(local_file)
-        raise e
+        os.remove(local_file)
+        print(f"[OK] Deleted local file")
+    except:
+        print("[WARN] Could not delete file")
 
-# ─────────────────────────────────────────────
-# Global Error Handler
-# ─────────────────────────────────────────────
-@app.exception_handler(Exception)
-async def global_exception(request: Request, exc: Exception):
-    print(f"[ERROR] {exc}")
-    return JSONResponse(status_code=500, content={"detail": str(exc)})
+    return {
+        "success": True,
+        "drive_file": uploaded
+    }

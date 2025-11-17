@@ -1,9 +1,11 @@
-fastapi==0.115.0
-uvicorn[standard]==0.30.5
+fastapi
+uvicorn[standard]
+requests
 yt-dlp
-google-api-python-client
 google-auth
-google-auth-httplib2
 google-auth-oauthlib
-psutil
-python-dotenv
+google-auth-httplib2
+google-api-python-client
+playwright
+pydantic
+httplib2

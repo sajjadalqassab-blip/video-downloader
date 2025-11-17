@@ -1,0 +1,9 @@
+tunnel: 06f8528b-ed8f-41ad-886b-582576a65eb7
+credentials-file: C:\Users\HP\.cloudflared\06f8528b-ed8f-41ad-886b-582576a65eb7.json
+
+ingress:
+  - hostname: api.fadshi.digital-video.org
+    service: http://localhost:8000
+    origin_request:
+      no_tls_verify: true
+  - service: http://localhost:8000
