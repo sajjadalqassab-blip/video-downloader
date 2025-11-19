@@ -94,7 +94,7 @@ def extract_aliexpress_video(url: str) -> str:
 
     outfile = f"{uuid.uuid4()}.mp4"
 
-    # FIXED INDENTATION ↓↓↓↓↓
+    # Clean indentation for ydl_opts
     ydl_opts = {
         "outtmpl": outfile,
         "format": "mp4",
@@ -103,7 +103,6 @@ def extract_aliexpress_video(url: str) -> str:
         "no_warnings": False,
         "noplaylist": True,
     }
-    # FIXED INDENTATION ↑↑↑↑↑
 
     # ========== INSTAGRAM COOKIES SUPPORT ==========
     ig_cookies = os.getenv("IG_COOKIES")
@@ -112,6 +111,7 @@ def extract_aliexpress_video(url: str) -> str:
         cookies_path = "/tmp/ig_cookies.txt"
         with open(cookies_path, "w") as f:
             f.write(ig_cookies)
+
         ydl_opts["cookiefile"] = cookies_path
         print("[INFO] Instagram cookies loaded for yt-dlp")
     # ===============================================
@@ -125,8 +125,6 @@ def extract_aliexpress_video(url: str) -> str:
 
     print(f"[OK] yt-dlp download complete → {outfile}")
     return outfile
-
-
 
 # ============== GOOGLE DRIVE UPLOAD ==============
 def upload_to_drive(local_path, filename):
