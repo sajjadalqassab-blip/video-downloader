@@ -94,13 +94,15 @@ def download_with_ytdlp(url: str) -> str:
 
     outfile = f"{uuid.uuid4()}.mp4"
 
-    ydl_opts = {
-        "outtmpl": outfile,
-        "format": "mp4",
-        "quiet": False,
-        "no_warnings": False,
-        "noplaylist": True,
-    }
+   ydl_opts = {
+    "outtmpl": outfile,
+    "format": "mp4",
+    "cookiefile": "/etc/secrets/INSTAGRAM_COOKIES",
+    "quiet": False,
+    "no_warnings": False,
+    "noplaylist": True,
+}
+
 
     # ========== INSTAGRAM COOKIES SUPPORT ==========
     ig_cookies = os.getenv("IG_COOKIES")
