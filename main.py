@@ -1,4 +1,5 @@
 import os
+import re
 import uuid
 import requests
 import yt_dlp
@@ -7,7 +8,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-# Google Drive
+# Google Drive + Sheets
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
@@ -18,8 +19,10 @@ from playwright.sync_api import sync_playwright
 # ============== CONFIG ==============
 DRIVE_FOLDER_ID = "15slyKToMudp-SOHQx0FONS5r9HsXPE_3"
 
-# Render stores secrets in /etc/secrets/...
 CREDS_PATH = "/etc/secrets/GOOGLE_CREDS"
+
+SHEET_ID = "1S9qcTJ6i3OEm_6-l2fenGmqPp_AaQJrsJTZVNUGmYv0"
+SHEET_RANGE = "videos!C2:E"   # C = name, E = link
 
 # ============== FASTAPI ==============
 app = FastAPI()
@@ -36,6 +39,73 @@ class DownloadRequest(BaseModel):
     url: str
     filename: str | None = None
 
+class SheetDownloadRequest(BaseModel):
+    limit: int | None = None  # optional for testing
+
+# ============== UTILS ==============
+def sanitize_filename(name: str) -> str:
+    """
+    Cleans filename for Windows/Linux and ensures .mp4 extension.
+    """
+    if not name:
+        name = str(uuid.uuid4())
+
+    name = name.strip()
+
+    # Remove invalid filesystem chars
+    name = re.sub(r'[\\/:*?"<>|]+', "_", name)
+
+    # Collapse spaces
+    name = re.sub(r"\s+", " ", name)
+
+    # Ensure extension
+    if not name.lower().endswith(".mp4"):
+        name += ".mp4"
+
+    return name
+
+
+def get_creds(scopes):
+    return Credentials.from_service_account_file(
+        CREDS_PATH,
+        scopes=scopes
+    )
+
+# ============== GOOGLE SHEETS READ ==============
+def read_sheet_rows() -> list[dict]:
+    """
+    Reads rows from videos!C2:E
+    Returns list of {row_index, name, url}
+    """
+    creds = get_creds([
+        "https://www.googleapis.com/auth/spreadsheets.readonly",
+        "https://www.googleapis.com/auth/drive",
+    ])
+
+    sheets_service = build("sheets", "v4", credentials=creds)
+
+    resp = sheets_service.spreadsheets().values().get(
+        spreadsheetId=SHEET_ID,
+        range=SHEET_RANGE
+    ).execute()
+
+    values = resp.get("values", [])
+    rows = []
+
+    # row_index in sheet (start from 2 because range starts at row 2)
+    for i, row in enumerate(values, start=2):
+        name = row[0].strip() if len(row) > 0 and row[0] else ""
+        url  = row[2].strip() if len(row) > 2 and row[2] else ""  # E is 3rd col in C:E
+
+        if url:
+            rows.append({
+                "row_index": i,
+                "name": name,
+                "url": url
+            })
+
+    return rows
+
 # ============== ALIEXPRESS EXTRACTOR ==============
 def extract_aliexpress_video(url: str) -> str:
     print(f"[INFO] Extracting AliExpress video → {url}")
@@ -51,14 +121,12 @@ def extract_aliexpress_video(url: str) -> str:
 
         page.goto(url, timeout=60000, wait_until="networkidle")
 
-        # Scroll to load videos
         for _ in range(12):
             page.evaluate("window.scrollBy(0, 1000)")
             page.wait_for_timeout(400)
 
         video_sources = []
 
-        # video source tags
         try:
             sources = page.query_selector_all("video source")
             for s in sources:
@@ -68,7 +136,6 @@ def extract_aliexpress_video(url: str) -> str:
         except:
             pass
 
-        # <video src="">
         try:
             videos = page.query_selector_all("video")
             for v in videos:
@@ -87,16 +154,14 @@ def extract_aliexpress_video(url: str) -> str:
         print("[WARN] No AliExpress video found")
         return None
 
-
 # ============== YT-DLP DOWNLOADER ==============
 def download_with_ytdlp(url: str) -> str:
     print(f"[INFO] Downloading via yt-dlp → {url}")
 
-    outfile = f"{uuid.uuid4()}.mp4"
+    tmp_outfile = f"{uuid.uuid4()}.mp4"
 
-    # Clean indentation for ydl_opts
     ydl_opts = {
-        "outtmpl": outfile,
+        "outtmpl": tmp_outfile,
         "format": "mp4",
         "cookiefile": "/etc/secrets/INSTAGRAM_COOKIES",
         "quiet": False,
@@ -104,17 +169,13 @@ def download_with_ytdlp(url: str) -> str:
         "noplaylist": True,
     }
 
-    # ========== INSTAGRAM COOKIES SUPPORT ==========
     ig_cookies = os.getenv("IG_COOKIES")
-
     if "instagram.com" in url and ig_cookies:
         cookies_path = "/tmp/ig_cookies.txt"
         with open(cookies_path, "w") as f:
             f.write(ig_cookies)
-
         ydl_opts["cookiefile"] = cookies_path
         print("[INFO] Instagram cookies loaded for yt-dlp")
-    # ===============================================
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -123,16 +184,12 @@ def download_with_ytdlp(url: str) -> str:
         print("[ERROR] yt-dlp failed:", str(e))
         return None
 
-    print(f"[OK] yt-dlp download complete → {outfile}")
-    return outfile
+    print(f"[OK] yt-dlp download complete → {tmp_outfile}")
+    return tmp_outfile
 
 # ============== GOOGLE DRIVE UPLOAD ==============
 def upload_to_drive(local_path, filename):
-    creds = Credentials.from_service_account_file(
-        CREDS_PATH,
-        scopes=["https://www.googleapis.com/auth/drive"]
-    )
-
+    creds = get_creds(["https://www.googleapis.com/auth/drive"])
     drive_service = build("drive", "v3", credentials=creds)
 
     metadata = {
@@ -151,50 +208,87 @@ def upload_to_drive(local_path, filename):
 
     return uploaded
 
-
-# ============== MAIN ENDPOINT ==============
-@app.post("/download")
-def download_video(request: DownloadRequest):
-    url = request.url.strip()
-    print(f"[INFO] Request → {url}")
-
+# ============== CORE PROCESSOR ==============
+def process_one_url(url: str, desired_name: str | None = None):
+    url = url.strip()
     local_file = None
 
-    # 1 — AliExpress
+    desired_name = sanitize_filename(desired_name or str(uuid.uuid4()))
+
     if "aliexpress.com" in url:
         video_url = extract_aliexpress_video(url)
         if not video_url:
-            raise HTTPException(status_code=500, detail="AliExpress video not found")
+            raise Exception("AliExpress video not found")
 
-        filename = f"{uuid.uuid4()}.mp4"
-        local_path = filename
+        tmp_local = f"{uuid.uuid4()}.mp4"
 
-        try:
-            r = requests.get(video_url, stream=True, timeout=60)
-            with open(local_path, "wb") as f:
-                for chunk in r.iter_content(1024 * 1024):
-                    f.write(chunk)
-            local_file = local_path
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Download failed: {e}")
+        r = requests.get(video_url, stream=True, timeout=60)
+        with open(tmp_local, "wb") as f:
+            for chunk in r.iter_content(1024 * 1024):
+                f.write(chunk)
+
+        local_file = tmp_local
 
     else:
-        # 2 — TikTok, Instagram, Facebook, etc.
         local_file = download_with_ytdlp(url)
         if not local_file:
-            raise HTTPException(status_code=500, detail="yt-dlp failed")
+            raise Exception("yt-dlp failed")
 
-    # Upload to Drive
-    uploaded = upload_to_drive(local_file, os.path.basename(local_file))
+    uploaded = upload_to_drive(local_file, desired_name)
 
-    # Delete local file
     try:
         os.remove(local_file)
         print(f"[OK] Deleted local file")
     except:
         print("[WARN] Could not delete file")
 
+    return uploaded, desired_name
+
+# ============== MAIN ENDPOINT (single url) ==============
+@app.post("/download")
+def download_video(request: DownloadRequest):
+    try:
+        uploaded, final_name = process_one_url(request.url, request.filename)
+        return {"success": True, "filename": final_name, "drive_file": uploaded}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============== SHEET ENDPOINT ==============
+@app.post("/download-from-sheet")
+def download_from_sheet(request: SheetDownloadRequest):
+    rows = read_sheet_rows()
+
+    if request.limit:
+        rows = rows[: request.limit]
+
+    results = []
+
+    for r in rows:
+        url = r["url"]
+        name = r["name"]
+
+        try:
+            uploaded, final_name = process_one_url(url, name)
+
+            results.append({
+                "row_index": r["row_index"],
+                "url": url,
+                "filename": final_name,
+                "success": True,
+                "drive_file": uploaded
+            })
+
+        except Exception as e:
+            results.append({
+                "row_index": r["row_index"],
+                "url": url,
+                "filename": sanitize_filename(name),
+                "success": False,
+                "error": str(e)
+            })
+
     return {
         "success": True,
-        "drive_file": uploaded
+        "count": len(results),
+        "results": results
     }
