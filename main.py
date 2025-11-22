@@ -22,7 +22,7 @@ DRIVE_FOLDER_ID = "15slyKToMudp-SOHQx0FONS5r9HsXPE_3"
 CREDS_PATH = "/etc/secrets/GOOGLE_CREDS"
 
 SHEET_ID = "1S9qcTJ6i3OEm_6-l2fenGmqPp_AaQJrsJTZVNUGmYv0"
-SHEET_RANGE = "videos!C2:E"   # C = name, E = link
+SHEET_RANGE = "videos!C2:G"     # C = name, E = link
 
 # ============== FASTAPI ==============
 app = FastAPI()
@@ -74,10 +74,9 @@ def get_creds(scopes):
 # ============== GOOGLE SHEETS READ ==============
 def read_sheet_rows() -> list[dict]:
     creds = get_creds([
-        "https://www.googleapis.com/auth/spreadsheets.readonly",
+        "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
     ])
-
     sheets_service = build("sheets", "v4", credentials=creds)
 
     resp = sheets_service.spreadsheets().values().get(
@@ -90,19 +89,27 @@ def read_sheet_rows() -> list[dict]:
 
     for i, row in enumerate(values, start=2):
         name = row[0].strip() if len(row) > 0 and row[0] else ""
-        cell = row[2].strip() if len(row) > 2 and row[2] else ""  # E inside C:E
 
-        if not cell:
+        cell_links = row[2].strip() if len(row) > 2 and row[2] else ""  # E
+        existing_links = row[3].strip() if len(row) > 3 and row[3] else ""  # F
+        status = row[4].strip().upper() if len(row) > 4 and row[4] else ""  # G
+
+        # Skip rows already fully done
+        if status == "DONE":
             continue
 
-        urls = [u.strip() for u in cell.splitlines() if u.strip()]
+        if not cell_links:
+            continue
 
-        for idx, url in enumerate(urls, start=1):
-            rows.append({
-                "row_index": i,
-                "name": name if idx == 1 else f"{name} ({idx})",
-                "url": url
-            })
+        urls = [u.strip() for u in cell_links.splitlines() if u.strip()]
+
+        rows.append({
+            "row_index": i,
+            "name": name,
+            "urls": urls,
+            "existing_drive_links": existing_links,
+            "existing_status": status,
+        })
 
     return rows
 
@@ -220,6 +227,24 @@ def upload_to_drive(local_path, filename):
 
     return uploaded
 
+# ============== SHEET WRITEBACK ==============
+def write_result_to_sheet(row_index: int, drive_links: str = "", status: str = "DONE"):
+    creds = get_creds([
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ])
+    sheets_service = build("sheets", "v4", credentials=creds)
+
+    range_to_write = f"videos!F{row_index}:G{row_index}"
+
+    sheets_service.spreadsheets().values().update(
+        spreadsheetId=SHEET_ID,
+        range=range_to_write,
+        valueInputOption="RAW",
+        body={"values": [[drive_links, status]]}
+    ).execute()
+
+
 # ============== CORE PROCESSOR ==============
 def process_one_url(url: str, desired_name: str | None = None):
     url = url.strip()
@@ -276,28 +301,65 @@ def download_from_sheet(request: SheetDownloadRequest):
     results = []
 
     for r in rows:
-        url = r["url"]
-        name = r["name"]
+        row_index = r["row_index"]
+        base_name = r["name"]
+        urls = r["urls"]
 
-        try:
-            uploaded, final_name = process_one_url(url, name)
+        row_success = True
+        drive_links_collected = []
+        row_results = []
 
-            results.append({
-                "row_index": r["row_index"],
-                "url": url,
-                "filename": final_name,
-                "success": True,
-                "drive_file": uploaded
-            })
+        for idx, url in enumerate(urls, start=1):
+            # make unique filename per link in same cell
+            per_link_name = base_name if idx == 1 else f"{base_name} ({idx})"
 
-        except Exception as e:
-            results.append({
-                "row_index": r["row_index"],
-                "url": url,
-                "filename": sanitize_filename(name),
-                "success": False,
-                "error": str(e)
-            })
+            try:
+                uploaded, final_name = process_one_url(url, per_link_name)
+                drive_url = uploaded.get("webViewLink") or ""
+
+                drive_links_collected.append(drive_url)
+
+                row_results.append({
+                    "url": url,
+                    "filename": final_name,
+                    "success": True,
+                    "drive_file": uploaded
+                })
+
+            except Exception as e:
+                row_success = False
+                row_results.append({
+                    "url": url,
+                    "filename": sanitize_filename(per_link_name),
+                    "success": False,
+                    "error": str(e)
+                })
+
+        # ✅ after ALL links:
+        if row_success:
+            write_result_to_sheet(
+                row_index,
+                "\n".join(drive_links_collected),
+                "DONE"
+            )
+            final_status = "DONE"
+        else:
+            # some failed
+            write_result_to_sheet(
+                row_index,
+                "\n".join(drive_links_collected),
+                "PARTIAL"
+            )
+            final_status = "PARTIAL"
+
+        results.append({
+            "row_index": row_index,
+            "name": base_name,
+            "status": final_status,
+            "links_count": len(urls),
+            "drive_links": drive_links_collected,
+            "items": row_results
+        })
 
     return {
         "success": True,
