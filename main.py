@@ -73,10 +73,6 @@ def get_creds(scopes):
 
 # ============== GOOGLE SHEETS READ ==============
 def read_sheet_rows() -> list[dict]:
-    """
-    Reads rows from videos!C2:E
-    Returns list of {row_index, name, url}
-    """
     creds = get_creds([
         "https://www.googleapis.com/auth/spreadsheets.readonly",
         "https://www.googleapis.com/auth/drive",
@@ -92,15 +88,19 @@ def read_sheet_rows() -> list[dict]:
     values = resp.get("values", [])
     rows = []
 
-    # row_index in sheet (start from 2 because range starts at row 2)
     for i, row in enumerate(values, start=2):
         name = row[0].strip() if len(row) > 0 and row[0] else ""
-        url  = row[2].strip() if len(row) > 2 and row[2] else ""  # E is 3rd col in C:E
+        cell = row[2].strip() if len(row) > 2 and row[2] else ""  # E inside C:E
 
-        if url:
+        if not cell:
+            continue
+
+        urls = [u.strip() for u in cell.splitlines() if u.strip()]
+
+        for idx, url in enumerate(urls, start=1):
             rows.append({
                 "row_index": i,
-                "name": name,
+                "name": name if idx == 1 else f"{name} ({idx})",
                 "url": url
             })
 
@@ -160,22 +160,34 @@ def download_with_ytdlp(url: str) -> str:
 
     tmp_outfile = f"{uuid.uuid4()}.mp4"
 
+    secret_cookie_path = "/etc/secrets/INSTAGRAM_COOKIES"
+    tmp_cookie_path = None
+
+    # copy secret cookies to /tmp because /etc/secrets is read-only
+    if os.path.exists(secret_cookie_path):
+        tmp_cookie_path = "/tmp/ig_cookies.txt"
+        with open(secret_cookie_path, "r") as src, open(tmp_cookie_path, "w") as dst:
+            dst.write(src.read())
+        print("[INFO] Copied INSTAGRAM_COOKIES to /tmp")
+
     ydl_opts = {
         "outtmpl": tmp_outfile,
         "format": "mp4",
-        "cookiefile": "/etc/secrets/INSTAGRAM_COOKIES",
         "quiet": False,
         "no_warnings": False,
         "noplaylist": True,
     }
 
+    # env var cookies override
     ig_cookies = os.getenv("IG_COOKIES")
     if "instagram.com" in url and ig_cookies:
-        cookies_path = "/tmp/ig_cookies.txt"
-        with open(cookies_path, "w") as f:
+        tmp_cookie_path = "/tmp/ig_cookies_env.txt"
+        with open(tmp_cookie_path, "w") as f:
             f.write(ig_cookies)
-        ydl_opts["cookiefile"] = cookies_path
-        print("[INFO] Instagram cookies loaded for yt-dlp")
+        print("[INFO] Instagram cookies loaded from env var")
+
+    if tmp_cookie_path:
+        ydl_opts["cookiefile"] = tmp_cookie_path
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
