@@ -1,6 +1,5 @@
 FROM python:3.11-slim
 
-# System deps for Playwright/Chromium
 RUN apt-get update && apt-get install -y \
     wget gnupg ca-certificates \
     fonts-liberation libasound2 libatk-bridge2.0-0 libatk1.0-0 \
@@ -13,10 +12,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# ✅ Force browsers to be installed in a stable path
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
-# ✅ Install Playwright browser into that path
 RUN python -m playwright install --with-deps chromium
 
 COPY . .

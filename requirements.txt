@@ -6,6 +6,6 @@ google-auth
 google-auth-oauthlib
 google-auth-httplib2
 google-api-python-client
-playwright
+playwright==1.49.0
 pydantic
 httplib2
