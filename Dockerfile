@@ -1,6 +1,5 @@
 FROM python:3.11-slim
 
-# System deps for Playwright/Chromium
 RUN apt-get update && apt-get install -y \
     wget gnupg ca-certificates \
     fonts-liberation libasound2 libatk-bridge2.0-0 libatk1.0-0 \
@@ -13,10 +12,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# ✅ Force browsers into the Docker image
-ENV PLAYWRIGHT_BROWSERS_PATH=0
+# ✅ Put browsers in a known folder inside the image
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
-# Install Playwright browser
+# ✅ Install chromium into that folder
 RUN python -m playwright install --with-deps chromium
 
 COPY . .
