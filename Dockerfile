@@ -13,12 +13,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Put browsers in a deterministic place + make it readable by non-root users (Render)
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 RUN mkdir -p /ms-playwright && chmod -R 777 /ms-playwright
 
-# Install Playwright browser matching the installed playwright version
-RUN python -m playwright install chromium
+RUN python -m playwright install chromium chromium-headless-shell
 
 COPY . .
 
