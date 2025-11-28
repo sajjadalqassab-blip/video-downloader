@@ -94,8 +94,8 @@ def read_sheet_rows() -> list[dict]:
         existing_links = row[3].strip() if len(row) > 3 and row[3] else ""  # F
         status = row[4].strip().upper() if len(row) > 4 and row[4] else ""  # G
 
-        # Skip rows already fully done
-        if status == "DONE":
+        # Skip rows already done or partially done
+        if status in ("DONE", "PARTIAL"):
             continue
 
         if not cell_links:
