@@ -13,11 +13,14 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# ✅ Tell Playwright where to store browsers (BEFORE install)
+# ✅ Force a shared install location for browsers
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
-# ✅ Install Playwright browser into /ms-playwright
+# ✅ Install browsers into that location
 RUN python -m playwright install --with-deps chromium
+
+# ✅ Give runtime users access
+RUN chmod -R 777 /ms-playwright
 
 COPY . .
 
